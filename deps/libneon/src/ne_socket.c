@@ -394,18 +394,18 @@ static int raw_poll(int fdno, int rdwr, int secs)
     int ret;
 #ifdef NE_USE_POLL
     struct pollfd fds;
-    int time_left = (secs > 0)?(secs):(-1);
+    int time_left = (secs >= 0)?(secs):(-1);
 
     fds.fd = fdno;
     fds.events = rdwr == 0 ? POLLIN : POLLOUT;
     fds.revents = 0;
 
     do {
-        ret = poll(&fds, 1, 1000);
+        ret = poll(&fds, 1, secs == 0 ? 0 : 1000);
         if( ret < 0 && !NE_ISINTR(ne_errno)){
             break; // error
         }
-    } while (ret <= 0 && --time_left);
+    } while (secs != 0 && ret <= 0 && --time_left);
 #else
     fd_set rdfds, wrfds;
     struct timeval timeout, *tvp = (secs >= 0 ? &timeout : NULL);

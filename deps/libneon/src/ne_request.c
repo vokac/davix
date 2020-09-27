@@ -755,6 +755,57 @@ static int read_response_block(ne_request *req, struct ne_response *resp,
 	willread = *buflen;
 	break;
     case R_NO_BODY:
+        {
+            const char *value = get_response_header_hv(req, HH_HV_TRANSFER_ENCODING, "transfer-encoding");
+            if (value && ne_strcasecmp(value, "chunked") == 0 && ne_sock_block(sock, 0) == 0) {
+                // StoRM violate HTTP standard and sends body also to HEAD request
+                // (throw away all remaining chunked data that can be read from socket)
+                unsigned long body_size = 0;
+                NE_DEBUG(NE_DBG_CORE, "Get rid of non-empty chunked body for response that should be empty according HTTP standard");
+                while (1) {
+                    unsigned long chunk_len, done_len = 0;
+                    char *ptr;
+                    char crlfbuf[2];
+                    readlen = ne_sock_readline(sock, req->respbuf, sizeof req->respbuf);
+                    if (readlen < 0) {
+                        return aborted(req, _("Could not read chunk size"), readlen);
+                    }
+                    body_size += readlen;
+                    NE_DEBUG(NE_DBG_HTTP, "[chunk] < %s", req->respbuf);
+                    chunk_len = strtoul(req->respbuf, &ptr, 16);
+                    if (ptr == req->respbuf || chunk_len == ULONG_MAX || chunk_len > UINT_MAX) {
+                        return aborted(req, _("Could not parse chunk size"), 0);
+                    }
+                    NE_DEBUG(NE_DBG_HTTP, "Got chunk size: %lu", chunk_len);
+                    while (done_len < chunk_len) {
+                        willread = chunk_len - done_len > *buflen ? *buflen : chunk_len - done_len;
+                        readlen = ne_sock_read(sock, buffer, willread);
+                        if (resp->mode == R_TILLEOF && (readlen == NE_SOCK_CLOSED || readlen == NE_SOCK_TRUNC)) {
+                            NE_DEBUG(NE_DBG_HTTP, "Got EOF.");
+                            readlen = 0;
+                        } else if (readlen < 0) {
+                            return aborted(req, _("Could not read response body"), readlen);
+                        } else {
+                            NE_DEBUG(NE_DBG_HTTP, "Got %" NE_FMT_SSIZE_T " bytes.", readlen);
+                        }
+                        done_len += readlen;
+                        body_size += readlen;
+                    }
+                    /* If we've read a whole chunk, read a CRLF */
+                    readlen = ne_sock_fullread(sock, crlfbuf, 2);
+                    if (readlen < 0)
+                        return aborted(req, _("Could not read chunk delimiter"), readlen);
+                    else if (crlfbuf[0] != '\r' || crlfbuf[1] != '\n')
+                        return aborted(req, _("Chunk delimiter was invalid"), 0);
+                    body_size += readlen;
+                    if (chunk_len == 0) {
+                        NE_DEBUG(NE_DBG_HTTP, "Finished chunk reading");
+                        break;
+                    }
+                }
+                NE_DEBUG(NE_DBG_CORE, "All superfluous chunked body data dropped (%d bytes)", body_size);
+            }
+        }
     default:
 	willread = 0;
 	break;
